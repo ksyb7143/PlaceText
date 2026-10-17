@@ -3,7 +3,7 @@
 /**
  * PlaceText - Adobe Illustrator Text Batch Placement Script
  * @version 0.3.0
- * @build 2026-10-17 11:50:14
+ * @build 2026-10-17 12:23:05
  * @license MIT
  */
 
@@ -762,6 +762,57 @@ var PlaceTextLayout = (function () {
      * フォント検索キャッシュ（同一実行セッション内での高速化）
      */
     var fontCache = {};
+    var cachedAvailableFonts = null;
+
+    /**
+     * 利用可能な全Illustratorフォント一覧を取得（初回のみ走査しキャッシュ）
+     * 各要素: { name: PostScript名, family: ファミリー名, style: スタイル名, displayName: 表示名, searchText: 検索用小文字文字列 }
+     *
+     * @returns {Array} フォント情報オブジェクトの配列
+     */
+    function getAvailableFonts() {
+        if (cachedAvailableFonts !== null) return cachedAvailableFonts;
+        cachedAvailableFonts = [];
+
+        var fonts = null;
+        try {
+            if (typeof app !== "undefined" && app.textFonts) {
+                fonts = app.textFonts;
+            }
+        } catch (e) {
+            return [];
+        }
+        if (!fonts || fonts.length === 0) return [];
+
+        for (var i = 0; i < fonts.length; i++) {
+            try {
+                var f = fonts[i];
+                if (!f) continue;
+                var psName = f.name || "";
+                var family = f.family || "";
+                var style = f.style || "";
+                var displayName = family ? (style ? family + " " + style : family) : psName;
+                cachedAvailableFonts.push({
+                    name: psName,
+                    family: family,
+                    style: style,
+                    displayName: displayName,
+                    searchText: (psName + " " + family + " " + style + " " + displayName).toLowerCase()
+                });
+            } catch (e) {}
+        }
+
+        // 表示名順に昇順ソート
+        cachedAvailableFonts.sort(function (a, b) {
+            var na = a.displayName.toLowerCase();
+            var nb = b.displayName.toLowerCase();
+            if (na < nb) return -1;
+            if (na > nb) return 1;
+            return 0;
+        });
+
+        return cachedAvailableFonts;
+    }
 
     /**
      * フォント名からTextFontオブジェクトを安全に検索・取得する
@@ -982,7 +1033,8 @@ var PlaceTextLayout = (function () {
         getTargetLayer: getTargetLayer,
         getBasePosition: getBasePosition,
         createStackLayout: createStackLayout,
-        findFont: findFont
+        findFont: findFont,
+        getAvailableFonts: getAvailableFonts
     };
 })();
 
@@ -1457,6 +1509,121 @@ var PlaceTextUI = (function () {
             "直接入力 (自由入力)"
         ];
 
+        /**
+         * フォント検索・サジェストダイアログ
+         * Illustratorにインストールされている全フォントからリアルタイムに絞り込み検索・選択
+         */
+        function showFontSearchDialog(initialQuery, onSelect) {
+            var allFonts = PlaceTextLayout.getAvailableFonts();
+            if (!allFonts || allFonts.length === 0) {
+                alert("利用可能なIllustratorフォントが見つかりませんでした。\nドキュメントを開いた状態で再度お試しください。", "PlaceText - フォント検索");
+                return;
+            }
+
+            var dlg = new Window("dialog", "フォント検索・サジェスト - PlaceText");
+            dlg.orientation = "column";
+            dlg.alignChildren = ["fill", "top"];
+            dlg.spacing = 8;
+            dlg.margins = [16, 16, 16, 14];
+
+            var headerGroup = dlg.add("group");
+            headerGroup.orientation = "column";
+            headerGroup.alignChildren = ["fill", "center"];
+            headerGroup.spacing = 4;
+
+            var lblPrompt = headerGroup.add("statictext", undefined, "フォント名またはファミリー名を入力して検索（例: 墨東、ゴシック、Arial）:");
+            var searchInput = headerGroup.add("edittext", undefined, initialQuery || "");
+            searchInput.preferredSize = [480, 24];
+
+            var statusLbl = headerGroup.add("statictext", undefined, "一致候補: 0 件");
+            statusLbl.graphics.foregroundColor = statusLbl.graphics.newPen(dlg.graphics.PenType.SOLID_COLOR, [0.35, 0.35, 0.35, 1], 1);
+
+            // 2列リストボックス: [フォント名 (Family + Style), PostScript名]
+            var fontList = dlg.add("listbox", undefined, [], {
+                numberOfColumns: 2,
+                showHeaders: true,
+                columnTitles: ["フォント名 (Family + Style)", "PostScript名"],
+                columnWidths: [280, 180]
+            });
+            fontList.preferredSize = [480, 240];
+
+            var currentMatches = [];
+
+            function refreshList(keyword) {
+                fontList.removeAll();
+                currentMatches = [];
+                var q = (keyword || "").replace(/^\s+|\s+$/g, "").toLowerCase();
+
+                var maxResults = 80;
+                for (var i = 0; i < allFonts.length; i++) {
+                    var f = allFonts[i];
+                    if (q === "" || f.searchText.indexOf(q) !== -1) {
+                        currentMatches.push(f);
+                        if (currentMatches.length >= maxResults) break;
+                    }
+                }
+
+                for (var j = 0; j < currentMatches.length; j++) {
+                    var itm = currentMatches[j];
+                    var li = fontList.add("item", itm.displayName);
+                    if (li.subItems && li.subItems.length > 0) {
+                        li.subItems[0].text = itm.name;
+                    }
+                }
+
+                if (q === "") {
+                    statusLbl.text = "インストール済みフォント: " + allFonts.length + " 件 (先頭 " + currentMatches.length + " 件を表示中)";
+                } else {
+                    statusLbl.text = "「" + keyword + "」の一致候補: " + currentMatches.length + " 件 (最大 " + maxResults + " 件表示)";
+                }
+
+                if (fontList.items.length > 0) {
+                    fontList.selection = 0;
+                }
+            }
+
+            searchInput.onChanging = function () {
+                refreshList(searchInput.text);
+            };
+
+            var btnRow = dlg.add("group");
+            btnRow.orientation = "row";
+            btnRow.alignChildren = ["right", "center"];
+            btnRow.spacing = 8;
+
+            var btnCancel = btnRow.add("button", undefined, "キャンセル", { name: "cancel" });
+            btnCancel.preferredSize = [80, 26];
+
+            var btnOk = btnRow.add("button", undefined, "このフォントを適用", { name: "ok" });
+            btnOk.preferredSize = [140, 26];
+
+            function applySelection() {
+                if (fontList.selection && fontList.selection.index >= 0) {
+                    var selIdx = fontList.selection.index;
+                    if (selIdx < currentMatches.length) {
+                        var selectedFont = currentMatches[selIdx];
+                        if (typeof onSelect === "function") {
+                            onSelect(selectedFont.name, selectedFont.displayName);
+                        }
+                        dlg.close(1);
+                    }
+                }
+            }
+
+            fontList.onDoubleClick = applySelection;
+
+            btnOk.onClick = applySelection;
+            btnCancel.onClick = function () {
+                dlg.close(0);
+            };
+
+            refreshList(initialQuery || "");
+            searchInput.active = true;
+
+            dlg.center();
+            dlg.show();
+        }
+
         function createFontSettingRow(parentPanel, labelText, defaultFont) {
             var row = parentPanel.add("group");
             row.orientation = "row";
@@ -1467,7 +1634,7 @@ var PlaceTextUI = (function () {
             lbl.preferredSize = [130, 20];
 
             var dropFont = row.add("dropdownlist", undefined, FONT_PRESETS);
-            dropFont.preferredSize = [130, 22];
+            dropFont.preferredSize = [115, 22];
 
             var initialFont = defaultFont || "";
             var initIdx = 0;
@@ -1489,11 +1656,28 @@ var PlaceTextUI = (function () {
             } catch (e) {}
 
             var customFontInput = row.add("edittext", undefined, initialFont);
-            customFontInput.preferredSize = [120, 22];
+            customFontInput.preferredSize = [105, 22];
             customFontInput.helpTip = "任意のフォント名（PostScript名または「墨東レラ」等の日本語ファミリー名）を入力できます";
 
             var isInitialCustom = (dropFont.selection && dropFont.selection.text.indexOf("入力") !== -1);
             customFontInput.enabled = isInitialCustom;
+
+            var btnSearch = row.add("button", undefined, "検索...");
+            btnSearch.preferredSize = [54, 22];
+            btnSearch.helpTip = "Illustratorにインストールされているフォントを検索・サジェストから選択します";
+
+            btnSearch.onClick = function () {
+                try {
+                    dropFont.selection = FONT_PRESETS.length - 1;
+                    customFontInput.enabled = true;
+                } catch (e) {}
+                showFontSearchDialog(customFontInput.text, function (psName, displayName) {
+                    customFontInput.text = psName;
+                    if (typeof statusText !== "undefined" && statusText) {
+                        statusText.text = "ステータス : フォント選択 (" + displayName + " [" + psName + "])";
+                    }
+                });
+            };
 
             dropFont.onChange = function () {
                 if (!dropFont.selection) return;
